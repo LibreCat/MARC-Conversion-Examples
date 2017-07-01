@@ -1,0 +1,436 @@
+#-
+#- LLUDSS - Data cleaning fixes. Using MARC records as input
+#-
+#- 2013 Patrick.Hochstenbach@UGent.be
+#-
+
+copy_field('merge.source','source')
+copy_field('merge.id','id')
+copy_field('merge.id','fSYS')
+replace_all('fSYS','^\w+:','')
+set_field('is_deleted','false')
+
+set_field('is_hidden','false')
+copy_field('merge.hidden','is_hidden')
+
+if exists('merge.deleted')
+    set_field('is_deleted','true')
+else
+    #- Document Type
+    unless exists('type')
+        marc_map('920a','type')
+    end
+    lookup("type","/opt/lludss-import/etc/material_types.csv",-default=>"other")
+
+    #- ISBN/ISSN
+    marc_map('020a','isbn.$append', -join=>'==')
+    marc_map('022a','issn.$append', -join=>'==')
+    join_field('isbn','==')
+    split_field('isbn','==')
+    join_field('issn','==')
+    split_field('issn','==')
+    replace_all('isbn.*','^([0-9xX-]+).*$','$1')
+    replace_all('issn.*','^([0-9xX-]+).*','$1')
+
+    #- System Control Number
+    marc_map('035a','sysctlnr.$append')
+    copy_field(sysctlnr.*,all.$append)
+
+    #- Title
+    marc_map('245ab','title', -join => ' ')
+    replace_all('title','((\s+\W\s*)+|\.)$','')
+    copy_field('title','title_sort')
+    replace_all('title_sort','\W+','')
+    substring('title_sort',0,50)
+    downcase('title_sort')
+    copy_field('title','json.title')
+    marc_map('246','json.title_remainder', -join => ' ')
+    marc_map('245a','title_short')
+    replace_all('title_short','((\s+\W\s*)+|\.)$','')
+    replace_all('title_short','^\[([^\]]*)\]$','$1')
+
+    if all_match('source','ser01|ejn01')
+        marc_map('210a','title_alternative.$append')
+    end
+
+    #- Clean empty titles
+    if all_match('title_sort','^\s*$')
+        remove_field('title_sort')
+    end
+
+    #- Author
+    marc_map('100ab','author.$append', -join=>' ')
+    do marc_each()
+       unless marc_match('700e','promotor|copromotor|thesisbegeleider|commissaris|masterproefbegeleider|lector')
+            marc_map('700ab','author.$append', -join=>' ')
+        end
+    end
+
+    author_names()
+    copy_field('author','json.author')
+
+    #-Author-id
+    marc_map('1000','author_id.$append')
+    marc_map('7000','author_id.$append')
+    marc_map('7200','author_id.$append')
+
+    #- Imprint
+    marc_map('008_/7-10','year')
+    if all_match('year','[u^?-]{4}')
+       remove_field('year')
+    end
+    replace_all('year','\D','0')
+
+    if greater_than('year','2025')
+        remove_field('year')
+    end
+
+    if marc_match('008_/6-6','b')
+        # official marc: 'b' + year in 008 = nonsense
+        remove_field('year')
+    end
+
+    #- Edition
+    marc_map('250a','json.edition')
+
+    #- Description
+    marc_map('300a','json.desc_extend')
+
+    #- Summary
+    marc_map('505a','json.summary.$append', -join => "\n")
+    marc_map('520a','json.summary.$append', -join => "\n")
+
+    #- Als we een dissertation hebben dan is 502 de summary.
+    #- Dit is dan ook automatisch een UGent publication
+    if all_match('type','phd|master')
+        marc_map('502a','summary.$append')
+
+        if exists('summary')
+            join_field('summary','')
+            move_field('summary','json.summary.$append')
+        end
+    end
+
+    unless exists('json.summary')
+        weave_by_id('summary')
+        if exists('_weave.summary.data.summary')
+            copy_field('_weave.summary.data.summary','json.summary.$append')
+        end
+        remove_field('_weave')
+    end
+
+    #- Boost
+    unless exists('_boost')
+        # Calculate the generic boost
+        boost()
+
+        # Pick-up the specific boost
+        weave_by_id('boost')
+        if exists('_weave.boost.data.boost')
+            copy_field('_weave.boost.data.boost','_boost')
+        end
+        remove_field('_weave')
+    end
+
+    #- Language
+    marc_map('008_/35-37','lang')
+    if all_match('lang','\W+')
+        set_field('lang','und')
+    end
+
+    #- Subject
+    marc_map('6**^0123456789','subject.$append', -join => ' ')
+    replace_all('subject.*','\.$','')
+    sort_field('subject',-uniq=>1)
+    copy_field('subject','json.subject')
+
+    #- Library, Faculty, Location
+    marc_map('852c','library.$append')
+    sort_field('library',-uniq=>1)
+    marc_map('852x','faculty.$append')
+    marc_map('922a','_tmp.$append')
+    filter('_tmp','UGENT-')
+    replace_all('_tmp.*','UGENT-','')
+    copy_field('_tmp.*','faculty.$append')
+    remove_field('_tmp')
+    sort_field('faculty',-uniq=>1)
+    lookup("faculty.*","/opt/lludss-import/etc/faculties.csv",-delete=>1)
+    marc_map('852j','location.$append')
+    sort_field('location',-uniq=>1)
+
+     #- Host publication
+    host_publication()
+    move_field('host_publication','json.host_publication.$append')
+
+    #- Holding
+    if exists('p_holding')
+        copy_field('p_holding','all.$append')
+        copy_field('p_holding','year')
+        copy_field('p_holding','year_all.$append')
+        replace_all('year',' .*','')
+        move_field('p_holding','json.p_holding')
+        copy_field('p_holding_txt','json.host_publication.$append')
+        move_field('p_holding_txt','json.p_holding_txt')
+    end
+    if exists('e_holding')
+        copy_field('e_holding','all.$append')
+        copy_field('e_holding','year')
+        copy_field('e_holding','year_all.$append')
+        replace_all('year',' .*','')
+        move_field('e_holding','json.e_holding')
+        copy_field('e_holding_txt','json.host_publication.$append')
+        move_field('e_holding_txt','json.e_holding_txt')
+    end
+
+    join_field('json.host_publication','<br>')
+
+    #- Year cleanup
+    replace_all('year','^(?<=-)?0+','')
+    if all_match('year','^-?([0-9]|[123456789][0-9]+)$')
+        copy_field('year','year_all.$append')
+    else
+        remove_field('year')
+    end
+
+    # clean up year all
+    if exists('year_all')
+        join_field('year_all',' ')
+        trim('year_all')
+        split_field('year_all','\s+')
+        sort_field('year_all',-uniq => 1)
+    end
+
+    #- Cover Image
+    if all_match('merge.source','rug01|ser01|pug01|ebk01|bkt01')
+        weave_by_id('cover')
+        copy_field('_weave.cover.data.cover_remote','json.cover_remote')
+        remove_field('_weave')
+    end
+
+    #- Cover card-catalog
+    if exists(cid)
+        replace_all(cid,'-','')
+        copy_field(cid,all.$append)
+        if all_match(source,'rug02')
+            add_field('json.cover_remote.$append','http://lib.ugent.be/covers/card/')
+        else
+            add_field('json.cover_remote.$append','http://lib.ugent.be/covers/letter/')
+        end
+        move_field('cid','json.cover_remote.$append')
+        join_field('json.cover_remote','')
+    end
+
+    #- Fulltext
+    fulltext()
+    fulltext_manifests()
+    move_field('fulltext','json.fulltext')
+
+    #- Remove record without items or fulltext
+    unless exists('items')
+        unless exists('json.fulltext')
+            unless all_match('merge.source','pug01|rug02|rug03')
+                set_field('is_deleted','true')
+            end
+        end
+    end
+
+    #- CATEGORY
+    if exists('json.fulltext')
+        add_field('access.$append','online')
+    end
+    if exists('items')
+        add_field('access.$append','print')
+    end
+    if all_match('is_zoomable','true')
+        add_field('access.$append','zoomable')
+    end
+
+    sort_field("access",-uniq=>1, -reverse=>0)
+
+    #- ALL Field
+    all()
+
+    #- Identifier indexes rug01, ser01, ...
+    ids()
+
+    #- Set
+    marc_map('005','updated_at')
+    #- Warning: Aleph doesn't do zulu-time...
+    datetime_format('updated_at','time_zone' => 'Europe/Brussels','set_time_zone' => 'UTC','source_pattern' => '%Y%m%d%H%M%S.%N','destination_pattern' => '%Y-%m-%dT%H:%M:%SZ','delete' =>1)
+    add_field('is_oai','false')
+    if exists('updated_at')
+        add_field('set.$append','all')
+        set_field('is_oai','true')
+    end
+    sort_field('set',-unique=>1)
+
+    #- VIAF
+    marc_map('1000',viaf.$append,-join=>'==')
+    marc_map('7000',viaf.$append,-join=>'==')
+    join_field('viaf','==')
+    split_field('viaf','==')
+    filter(viaf,'\(viaf\)')
+    replace_all('viaf.*','\(viaf\)','viaf:')
+    lookup_in_store(viaf.*,'author')
+    copy_field(viaf.*.author.*,author_syn.$append)
+    copy_field(author_syn.*,all.$append)
+    remove_field(viaf)
+
+    #- Spellcheck
+    copy_field('author.*','spellcheck.$append')
+    join_field('spellcheck',' ')
+    replace_all('spellcheck','\s?[A-Z]+\s',' ')
+
+    #- Created
+    marc_map('CRDa','created.$append')
+    sort_field(created,uniq:1)
+
+    #- Biblio citations
+    move_field('cite','json.cite')
+
+    #- Barcode
+    marc_map('852p','barcode.$append')
+    marc_map('Z305','barcode.$append')
+    marc_map('856u','tmp.$append')
+    filter('tmp','google.*vid=GENT')
+    if exists(tmp.0)
+    replace_all(tmp.*,'.*vid=GENT','')
+    move_field(tmp.*,barcode.$append)
+    remove_field(tmp)
+    else
+    remove_field(tmp)
+    end
+    sort_field(barcode, uniq:1)
+    copy_field(barcode.*,all.$append)
+
+    #- Archive id
+    marc_map('024a','tmp.$append')
+    filter(tmp,'archive.ugent.be')
+    move_field(tmp.*,all.$append)
+
+    #- Location
+    copy_field(location.*,all.$append)
+
+    #- MARC Display
+    marc_map('245','marc_display.$append.title', -join => ' ')
+    marc_map('246','marc_display.$append.other-title', -join => ' ')
+    marc_map('765','marc_display.$append.orig-title', -join => ' ')
+    marc_map('210','marc_display.$append.abbrev-title', -join => ' ')
+    marc_map('240','marc_display.$append.other-title', -join => ' ')
+    marc_map('020','marc_display.$append.isbn', -join => ' ')
+    marc_map('022','marc_display.$append.issn', -join => ' ')
+    marc_map('028','marc_display.$append.publisher-no', -join => ' ')
+    marc_map('048','marc_display.$append.voices-code', -join => ' ')
+    marc_map('100','marc_display.$append.author', -join => ' ')
+    marc_map('110','marc_display.$append.corp-author', -join => ' ')
+    marc_map('700','marc_display.$append.author', -join => ' ')
+    marc_map('720','marc_display.$append.other-name', -join => ' ')
+    marc_map('111','marc_display.$append.conference', -join => ' ')
+    marc_map('130','marc_display.$append.other-title', -join => ' ')
+    marc_map('250','marc_display.$append.edition', -join => ' ')
+    marc_map('255','marc_display.$append.scale', -join => ' ')
+    marc_map('256','marc_display.$append.edition', -join => ' ')
+    marc_map('260','marc_display.$append.publisher', -join => ' ')
+    marc_map('261','marc_display.$append.publisher', -join => ' ')
+    marc_map('263','marc_display.$append.publisher', -join => ' ')
+    marc_map('300','marc_display.$append.description', -join => ' ')
+    marc_map('310','marc_display.$append.frequency', -join => ' ')
+    marc_map('321','marc_display.$append.prior-freq', -join => ' ')
+    marc_map('340','marc_display.$append.description', -join => ' ')
+    marc_map('362','marc_display.$append.pub-history', -join => ' ')
+    marc_map('400','marc_display.$append.series', -join => ' ')
+    marc_map('410','marc_display.$append.series', -join => ' ')
+    marc_map('440','marc_display.$append.series', -join => ' ')
+    marc_map('490','marc_display.$append.series', -join => ' ')
+    marc_map('500','marc_display.$append.note', -join => ' ')
+    marc_map('501','marc_display.$append.note', -join => ' ')
+    marc_map('502','marc_display.$append.thesis', -join => ' ')
+    marc_map('504','marc_display.$append.bibliography', -join => ' ')
+    marc_map('505','marc_display.$append.content', -join => ' ')
+    marc_map('508','marc_display.$append.credits', -join => ' ')
+    marc_map('510','marc_display.$append.note', -join => ' ')
+    marc_map('511','marc_display.$append.performers', -join => ' ')
+    marc_map('515','marc_display.$append.note', -join => ' ')
+    marc_map('518','marc_display.$append.note', -join => ' ')
+    marc_map('520','marc_display.$append.summary', -join => ' ')
+    marc_map('521','marc_display.$append.note', -join => ' ')
+    marc_map('525','marc_display.$append.note', -join => ' ')
+    marc_map('530','marc_display.$append.note', -join => ' ')
+    marc_map('533','marc_display.$append.note', -join => ' ')
+    marc_map('534','marc_display.$append.note', -join => ' ')
+    marc_map('540','marc_display.$append.note', -join => ' ')
+    marc_map('541','marc_display.$append.note', -join => ' ')
+    marc_map('544','marc_display.$append.note', -join => ' ')
+    marc_map('545','marc_display.$append.note', -join => ' ')
+    marc_map('546','marc_display.$append.note', -join => ' ')
+    marc_map('550','marc_display.$append.note', -join => ' ')
+    marc_map('555','marc_display.$append.note', -join => ' ')
+    marc_map('561','marc_display.$append.note', -join => ' ')
+    marc_map('580','marc_display.$append.note', -join => ' ')
+    marc_map('581','marc_display.$append.publication', -join => ' ')
+    marc_map('583','marc_display.$append.note', -join => ' ')
+    marc_map('586','marc_display.$append.note', -join => ' ')
+    marc_map('591','marc_display.$append.note', -join => ' ')
+    marc_map('598','marc_display.$append.classification', -join => ' ')
+    marc_map('080','marc_display.$append.udc-no', -join => ' ')
+    marc_map('082','marc_display.$append.dewey-no', -join => ' ')
+    marc_map('084','marc_display.$append.other-call-no', -join => ' ')
+    marc_map('600','marc_display.$append.subject', -join => ' ')
+    marc_map('610','marc_display.$append.subject', -join => ' ')
+    marc_map('611','marc_display.$append.subject', -join => ' ')
+    marc_map('630','marc_display.$append.subject', -join => ' ')
+    marc_map('650','marc_display.$append.subject', -join => ' ')
+    marc_map('651','marc_display.$append.subject', -join => ' ')
+    marc_map('653','marc_display.$append.subject', -join => ' ')
+    marc_map('655','marc_display.$append.subject', -join => ' ')
+    marc_map('662','marc_display.$append.subject', -join => ' ')
+    marc_map('690','marc_display.$append.subject', -join => ' ')
+    marc_map('692','marc_display.$append.subject', -join => ' ')
+    marc_map('693','marc_display.$append.subject', -join => ' ')
+    marc_map('710','marc_display.$append.corp-author', -join => ' ')
+    marc_map('711','marc_display.$append.conference', -join => ' ')
+    marc_map('730','marc_display.$append.other-title', -join => ' ')
+    marc_map('749','marc_display.$append.title-local', -join => ' ')
+    marc_map('752','marc_display.$append.other-info', -join => ' ')
+    marc_map('753','marc_display.$append.other-info', -join => ' ')
+    marc_map('772','marc_display.$append.parent-rec-ent', -join => ' ')
+    marc_map('776','marc_display.$append.add-phys-form-e', -join => ' ')
+    marc_map('777','marc_display.$append.issu-with-entry', -join => ' ')
+    marc_map('780','marc_display.$append.preceding-entry', -join => ' ')
+    marc_map('785','marc_display.$append.succeed-entry', -join => ' ')
+    marc_map('LKRn','marc_display.$append.note', -join => ' ')
+    marc_map('024','marc_display.$append.object-id', -join => ' ')
+    marc_map('856','marc_display.$append.e-location', -join => ' ')
+    #-if_all_match('merge.source','ser01')
+    #-    marc_map('852jhaz','marc_display.$append.location', -join => ' | ')
+    #-end
+    #-if_all_match('merge.source','rug01')
+    #-    marc_map('Z303haz','marc_display.$append.location', -join => ' | ')
+    #-end
+    to_json('marc_display')
+
+    #- JCR impact factor arraty (when available)
+    impact()
+
+    #- Europeana magic
+    europeana()
+
+    #- MARCXML
+    marc_xml('record')
+    move_field('record','fXML')
+
+    copy_field('version','json.version')
+
+    #- Record licenses
+    add_field('has_metadata_license','ODBL')
+end
+
+#- JSON
+to_json('json')
+
+add_field('_bag','data')
+
+remove_field('cite')
+remove_field('record')
+remove_field('merge')
+remove_field('version')
