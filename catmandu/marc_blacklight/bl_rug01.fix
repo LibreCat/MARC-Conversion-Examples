@@ -1,0 +1,289 @@
+# source
+add_field(source_facet, {{source}})
+
+# id
+marc_map(090a, id)
+unless exists(id)
+  copy_field(_id, id)
+end
+prepend(id, ':')
+prepend(id, {{source}})
+copy_field(id, _id)
+
+# eid
+marc_map(090a, eid_t)
+
+# language
+marc_map('008_/35-37', language_facet)
+if all_match(language_facet, '\W+')
+  set_field(language_facet, und)
+end
+
+# format
+marc_map(920a, type_facet.$append)
+copy_field(type_facet.$first, format)
+
+# isbn/issn
+marc_map(020a, isbn_t.$append)
+marc_map(022a, issn_t.$append)
+flatten(isbn_t)
+flatten(issn_t)
+replace_all(isbn_t.*, '^([0-9xX-]+).*$', '$1')
+replace_all(issn_t.*, '^([0-9xX-]+).*', '$1')
+
+# thumbnail
+copy_field(isbn_t.0, thumbnail_url_display)
+prepend(thumbnail_url_display, 'http://images.amazon.com/images/P/')
+append(thumbnail_url_display, '.01.TZZZZZZZ')
+
+# title
+marc_map(245ab, title_display, join: " ")
+replace_all(title_display, ' [:/]$', "")
+# cageweb
+if all_match(source_facet, 'bgc01|cgw01|hva01|ams01|msk01|dmg01')
+  marc_map(245, title_t, join: " ")
+  replace_all(title_t, ' [:/]$', "")
+else
+  marc_map(245a, title_t)
+  replace_all(title_t, ' [:/]$', "")
+  marc_map(245b, subtitle_t, join: " ")
+  replace_all(subtitle_t, ' [:/]$', "")
+end
+marc_map(240, title_addl_t.$append, join: " ")
+marc_map(246, title_addl_t.$append, join: " ")
+marc_map(740, title_addl_t.$append, join: " ")
+marc_map(765, title_addl_t.$append, join: " ")
+replace_all(title_addl_t.*, ' [:/]$', "")
+marc_map(400, title_series_t, join: " ")
+marc_map(410, title_series_t, join: " ")
+marc_map(440, title_series_t, join: " ")
+marc_map(490, title_series_t, join: " ")
+copy_field(title_t, title_sort)
+replace_all(title_sort, '\W+', "")
+substring(title_sort, 0, 50)
+downcase(title_sort)
+if all_match(title_sort, '^\s*$')
+  remove_field(title_sort)
+end
+
+# author
+marc_map(100ab, author_t.$append, join: " ")
+marc_map(710ab, author_t.$append) # corporate authors
+do marc_each()
+  unless marc_match(700e, 'promotor|copromotor|thesisbegeleider|commissaris|masterproefbegeleider')
+    marc_map(700ab, author_t.$append, join: " ")
+  end
+end
+replace_all(author_t.*, ',$', "")
+copy_field(author_t, author_display)
+if exists(author_t)
+  copy_field(author_t.$first, author_sort)
+end
+
+# edition
+marc_map(250, edition_display, join: " ")
+
+# physical description
+marc_map(300, description_display, join: " ")
+
+# subject
+marc_map(6**axv, subject_t.$append, join: " ")
+replace_all(subject_t.*, '\.$', "")
+
+# publication
+marc_map(260, published_display, join: " ")
+marc_map(261, published_display, join: " ")
+marc_map(263, published_display, join: " ")
+replace_all(published_display, '\.$', "")
+marc_map('008_/7-10', pub_date)
+if all_match(pub_date, '^\d{4}$')
+  if greater_than(pub_date, 2018)
+    remove_field(pub_date)
+  else
+    # era flag is incorrect most of the time
+    if marc_match('008_/6-6', b)
+      remove_field(pub_date)
+    end
+  end
+else
+  remove_field(pub_date)
+end
+
+# host
+if all_match(source_facet, 'hog01')
+  marc_map(773t, title_host_t)
+  marc_map(773w, host_id_t)
+  marc_map(773g, issue_display)
+  marc_map(773q, first_page_display)
+  unless exists(pub_date)
+    marc_map(773n, pub_date)
+    unless all_match(pub_date, '^\d{4}$')
+      remove_field(pub_date)
+    end
+  end
+end
+
+if exists(pub_date)
+  copy_field(pub_date, pub_date_sort)
+end
+
+# url
+do marc_each()
+  if marc_match(856u, 'http://sfxit.ugent.be')
+    unless any_equal(access_facet.*, 'online')
+      add_field(access_facet.$append, 'online')
+    end
+  else
+    marc_map(8563uz, elocation_display.$append, join: " ")
+    # ebk03 ejn03 ebk02 ejn02
+    if marc_match(8563, 'Full text')
+      marc_map(856uz, fulltext_display, join: " ")
+      unless any_equal(access_facet.*, 'online')
+        add_field(access_facet.$append, 'online')
+      end
+    end
+  end
+end
+
+# note, summary
+marc_map(500a, note_display.$append)
+marc_map(502a, summary_t.$append)
+marc_map(541, note_display.$append, join: ' ')
+marc_map(580a, note_display.$append)
+marc_map(520a, summary_t.$append)
+marc_map(505a, summary_t.$append)
+
+# conference (contains promoter instead in hog01)
+if all_match(source_facet, 'hog01')
+  marc_map(720, promotor_t)
+else
+  marc_map(720, conference_display)
+end
+
+# library and callnum
+do marc_each()
+  if marc_match(852, '.')
+    if all_match(source_facet, 'hog01')
+      if marc_match(852b, '.')
+        marc_map(852b, library_display.$append)
+      end
+    else
+      if marc_match(852c, '.')
+        marc_map(852c, library_display.$append)
+      end
+    end
+    if exists(library_display)
+      copy_field(library_display, library_facet)
+    else
+      add_field(library_display.$append, '')
+    end
+    if marc_match(852j, '.')
+      marc_map(852j, callnum_display.$append)
+    else
+      add_field(callnum_display.$append, '')
+    end
+    if marc_match(852p, '.')
+      marc_map(852p, barcode_display.$append)
+      unless any_equal(access_facet.*, 'print')
+        add_field(access_facet.$append, 'print')
+      end
+    else
+      add_field(barcode_display.$append, '')
+    end
+    if marc_match(852a, '.')
+      marc_map(852az, holding_display.$append, join: " ")
+    else
+      add_field(holding_display.$append, '')
+    end
+  end
+end
+
+# add interpunction for adlib records (cageweb)
+if marc_match(852c, '^MSK|AMSAB|ALIJN|DMG$')
+  remove_field(title_display)
+  remove_field(published_display)
+  remove_field(description_display)
+
+  if marc_match(245c, '.')
+    marc_map(245c, title_display.2)
+    prepend(title_display.2, '/ ')
+  else
+    add_field(title_display.2, '')
+  end
+  if marc_match(245b, '.')
+    marc_map(245b, title_display.1)
+    prepend(title_display.1, ': ')
+  else
+    add_field(title_display.1, '')
+  end
+  if marc_match(245a, '.')
+    marc_map(245a, title_display.0)
+  else
+    add_field(title_display.0, '')
+  end
+  join_field(title_display, ' ')
+
+  if marc_match(260c, '.')
+    marc_map(260c, published_display.2)
+    prepend(published_display.2, ', ')
+  else
+    add_field(published_display.2, '')
+  end
+  if marc_match(260b, '.')
+    marc_map(260b, published_display.1)
+    prepend(published_display.1, ': ')
+  else
+    add_field(published_display.1, '')
+  end
+  if marc_match(260a, '.')
+    marc_map(260a, published_display.0)
+  else
+    add_field(published_display.0, '')
+  end
+  join_field(published_display, ' ')
+  
+  if marc_match(300c, '.')
+    marc_map(300c, description_display.2)
+    prepend(description_display.2, '; ')
+  else
+    add_field(description_display.2, '')
+  end
+  if marc_match(300b, '.')
+    marc_map(300b, description_display.1)
+    prepend(description_display.1, ': ')
+  else
+    add_field(description_display.1, '')
+  end
+  if marc_match(300a, '.')
+    marc_map(300a, description_display.0)
+  else
+    add_field(description_display.0, '')
+  end
+  join_field(description_display, ' ')
+end
+
+# text
+copy_field(id, text.$append)
+copy_field(barcode_display.*, text.$append)
+copy_field(callnum_display.*, text.$append)
+copy_field(type_facet.*, text.$append)
+copy_field(published_display, text.$append)
+copy_field(pub_date, text.$append)
+copy_field(title_t, text.$append)
+copy_field(subtitle_t, text.$append)
+copy_field(title_addl_t.*, text.$append)
+copy_field(title_host_t, text.$append)
+copy_field(title_series_t.*, text.$append)
+copy_field(author_t.*, text.$append)
+copy_field(promotor_t.*, text.$append)
+copy_field(subject_t.*, text.$append)
+copy_field(summary_t.*, text.$append)
+copy_field(isbn_t.*, text.$append)
+copy_field(issn_t.*, text.$append)
+copy_field(note_display.*, text.$append)
+copy_field(description_display, text.$append)
+copy_field(conference_display, text.$append)
+
+# marc xml
+marc_xml(record)
+move_field(record, marc_display)
